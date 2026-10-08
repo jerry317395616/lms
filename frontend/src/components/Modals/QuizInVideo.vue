@@ -51,12 +51,14 @@
 								:label="__('Remove quiz')"
 								@click="removeQuiz(selections, unselectAll)"
 							>
-								<span class="lucide-trash-2 h-4 w-4" />
+								<template #icon>
+									<span class="lucide-trash-2 size-4" />
+								</template>
 							</Button>
 						</template>
 					</ResponsiveListView>
 
-					<div v-else class="text-ink-gray-5 italic text-xs">
+					<div v-else class="text-ink-gray-6 italic text-xs">
 						{{ __('No quizzes added yet.') }}
 					</div>
 				</div>
