@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 
 import inspect
+import os
 from functools import cache
 from typing import NamedTuple
 from urllib.parse import unquote
@@ -9,7 +10,7 @@ from urllib.parse import unquote
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.query_builder.functions import Locate
+from frappe.query_builder.functions import Count, Locate
 from frappe.rate_limiter import rate_limit
 from frappe.utils import add_to_date, now_datetime
 from frappe.utils.response import send_private_file
@@ -23,8 +24,10 @@ from lms.lms.lesson_assessments import lesson_assessment_rows
 from lms.lms.permissions import (
 	INSTRUCTOR_FIELDS,
 	can_access_lesson,
+	can_author_assessment,
 	courses_authored_by_each,
 	get_locked_lessons,
+	unplaceable_assessments,
 )
 from lms.lms.utils import (
 	get_course_progress,
@@ -58,9 +61,40 @@ class CourseLesson(Document):
 		"""Rebuild this lesson's placement rows from its own content, never hand-edited.
 		Runs in validate, not on_update: child rows are written during save, so an
 		on_update append would persist nothing."""
+		rows = lesson_assessment_rows(self.body, self.content, self.instructor_content)
+		self.validate_added_placements(rows)
 		self.set("assessments", [])
-		for row in lesson_assessment_rows(self.body, self.content, self.instructor_content):
+		for row in rows:
 			self.append("assessments", row)
+
+	def validate_added_placements(self, rows):
+		"""A lesson may newly place only assessments its editor can already administer,
+		the same rule a batch applies. Placements the lesson already had stay as they are."""
+		placements = {(row["assessment_type"], row["assessment_name"]) for row in rows}
+		if self.quiz_id and frappe.db.exists("LMS Quiz", self.quiz_id):
+			placements.add(("LMS Quiz", self.quiz_id))
+		refused = unplaceable_assessments(placements - self.stored_placements())
+		if refused:
+			frappe.throw(
+				_("You are not authorized to add {0} to this lesson.").format(next(iter(refused))[1]),
+				frappe.PermissionError,
+			)
+
+	def stored_placements(self) -> set:
+		if self.is_new():
+			return set()
+		stored = {
+			(row.assessment_type, row.assessment_name)
+			for row in frappe.get_all(
+				"LMS Lesson Assessment",
+				filters={"parent": self.name, "parenttype": "Course Lesson"},
+				fields=["assessment_type", "assessment_name"],
+			)
+		}
+		quiz_id = frappe.db.get_value("Course Lesson", self.name, "quiz_id")
+		if quiz_id:
+			stored.add(("LMS Quiz", quiz_id))
+		return stored
 
 	def on_update(self):
 		self.validate_quiz_id()
@@ -99,6 +133,8 @@ class CourseLesson(Document):
 				quiz = (block.get("data") or {}).get("quiz")
 				if not frappe.db.exists("LMS Quiz", quiz):
 					frappe.throw(_("Invalid Quiz ID in content"))
+				if not may_restamp_quiz(quiz, self.name):
+					continue
 				frappe.db.set_value(
 					"LMS Quiz",
 					quiz,
@@ -107,6 +143,27 @@ class CourseLesson(Document):
 						"lesson": self.name,
 					},
 				)
+
+
+def may_restamp_quiz(quiz: str, lesson: str) -> bool:
+	"""Placing a quiz grants use only, so a lesson moves another author's quiz stamp
+	only when that stamp no longer names a lesson placing it."""
+	if can_author_assessment("LMS Quiz", quiz):
+		return True
+	stamped = frappe.db.get_value("LMS Quiz", quiz, "lesson")
+	if not stamped or stamped == lesson:
+		return True
+	if frappe.db.get_value("Course Lesson", stamped, "quiz_id") == quiz:
+		return False
+	return not frappe.db.exists(
+		"LMS Lesson Assessment",
+		{
+			"parent": stamped,
+			"parenttype": "Course Lesson",
+			"assessment_type": "LMS Quiz",
+			"assessment_name": quiz,
+		},
+	)
 
 
 def cleanup_lesson_backreferences(lesson: str):
@@ -375,7 +432,20 @@ def serve_resource(file_url: str):
 
 	# send_private_file expects a path relative to the site's private/ dir.
 	relative_path = file_url.split("/private", 1)[1] if "/private" in file_url else file_url
-	return _serve_private_file(relative_path, file_row.file_name)
+	return _serve_private_file(relative_path, _download_name(file_row.file_name, relative_path))
+
+
+def _download_name(file_name: str | None, relative_path: str) -> str:
+	"""The File's name when it ends in the stored file's own extension, else the stored name.
+
+	send_private_file takes the Content-Type from this name but decides inline or download
+	from the stored path. file_name is editable by the File's owner, so a name whose
+	extension differs from the stored file could serve its bytes as another type.
+	"""
+	stored_name = os.path.basename(relative_path)
+	if file_name and os.path.splitext(file_name)[1].lower() == os.path.splitext(stored_name)[1].lower():
+		return file_name
+	return stored_name
 
 
 @cache
@@ -615,6 +685,8 @@ def get_quiz_progress(lesson):
 		quizzes = [value for name, value in macros if name == "Quiz"]
 
 	for quiz in quizzes:
+		if not get_valid_question_count(quiz):
+			continue
 		passing_percentage = frappe.db.get_value("LMS Quiz", quiz, "passing_percentage")
 		if not frappe.db.exists(
 			"LMS Quiz Submission",
@@ -626,6 +698,20 @@ def get_quiz_progress(lesson):
 		):
 			return False
 	return True
+
+
+def get_valid_question_count(quiz: str) -> int:
+	"""Rows whose LMS Question still exists; the quiz page drops the rest, so a quiz
+	with none cannot be submitted."""
+	row = frappe.qb.DocType("LMS Quiz Question")
+	question = frappe.qb.DocType("LMS Question")
+	return (
+		frappe.qb.from_(row)
+		.join(question)
+		.on(question.name == row.question)
+		.where((row.parent == quiz) & (row.parenttype == "LMS Quiz"))
+		.select(Count("*"))
+	).run()[0][0]
 
 
 UNTITLED_LESSON_TITLE = "Untitled lesson"

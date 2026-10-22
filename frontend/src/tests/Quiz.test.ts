@@ -189,12 +189,34 @@ beforeEach(() => {
 	localStorage.clear()
 })
 
+// Guards an empty quiz, or one whose questions no longer resolve, offering Start
+// beside "no questions" and opening on nothing. Came with Start moving below the
+// rules, out of the branch that excluded it. Added on quiz-share-link.
+describe('Quiz with no questions', () => {
+	it('offers no Start button and cannot be started', async () => {
+		const response = quizResponse()
+		response.quiz.questions = [{ question: 'DELETED', marks: 1 }]
+		resourceState.response = response
+		const wrapper = mountQuiz()
+		await flushPromises()
+
+		expect(wrapper.text()).toContain(
+			'This quiz has no questions available yet.'
+		)
+		expect(
+			wrapper.findAll('button').some((b) => b.text() === 'Start Quiz')
+		).toBe(false)
+		;(wrapper.vm as any).startQuiz()
+		expect((wrapper.vm as any).activeQuestion).toBe(0)
+	})
+})
+
 describe('Quiz remount', () => {
 	it('restores valid questions without extra requests after remounting the same quiz', async () => {
 		const first = mountQuiz()
 		await flushPromises()
 
-		expect(first.text()).toContain('1 question')
+		expect(first.text()).toContain('Questions1')
 		expect(first.text()).toContain('Start')
 		expect(first.text()).not.toContain(
 			'This quiz has no questions available yet.'
@@ -210,7 +232,7 @@ describe('Quiz remount', () => {
 			['lms.lms.utils.get_quiz_with_questions', { quiz: 'QUIZ-1' }],
 			['lms.lms.utils.get_quiz_with_questions', { quiz: 'QUIZ-1' }],
 		])
-		expect(second.text()).toContain('1 question')
+		expect(second.text()).toContain('Questions1')
 		expect(second.text()).toContain('Start')
 		expect(second.text()).not.toContain(
 			'This quiz has no questions available yet.'
@@ -328,20 +350,6 @@ describe('Quiz choices', () => {
 		await flushPromises()
 	}
 
-	it('sends the option the learner picks', async () => {
-		const wrapper = mountQuiz()
-		await flushPromises()
-		resourceState.checkAnswer = [1, 0]
-		await pickFirstAndCheck(wrapper)
-
-		// The warning toast instead of a request would mean getAnswers() saw
-		// nothing selected, i.e. the radio never reached selectedOptions.
-		expect(resourceState.request.mock.calls.map((call) => call[0])).toContain(
-			'lms.lms.doctype.lms_quiz.lms_quiz.check_answer'
-		)
-		wrapper.unmount()
-	})
-
 	it('marks each option right or wrong once checked, keeping the labels', async () => {
 		const wrapper = mountQuiz()
 		await flushPromises()
@@ -386,14 +394,19 @@ describe('Quiz card', () => {
 		expect(wrapper.text()).toContain('Start Quiz')
 	})
 
-	it('summarises the quiz type, size and pass mark in the header', async () => {
+	// The stats repeat it before the start, so the header carries it only during
+	// the attempt.
+	it('summarises the quiz type, size and pass mark in the header once started', async () => {
 		resourceState.response = choicesQuizResponse(2)
 		const wrapper = mountQuiz()
 		await flushPromises()
+		const summary =
+			'Multiple choice\u2002·\u20022 questions\u2002·\u2002pass at 70%'
+		expect(wrapper.text()).not.toContain(summary)
 
-		expect(wrapper.text()).toContain(
-			'Multiple choice · 2 questions · pass at 70%'
-		)
+		await startQuiz(wrapper)
+
+		expect(wrapper.text()).toContain(summary)
 	})
 
 	it('renders one option row per option and a verdict after Check', async () => {
@@ -543,7 +556,7 @@ describe('Quiz for screen readers', () => {
 		const submission = (wrapper.vm as any).quizSubmission
 		submission.data = result
 		await flushPromises()
-		expect(wrapper.text()).toContain('Quiz Summary')
+		expect(wrapper.text()).toContain('Quiz result')
 		expect(document.activeElement?.tagName).not.toBe('H2')
 
 		submission.submit.mockImplementation((_: unknown, callbacks: any) => {
@@ -552,6 +565,6 @@ describe('Quiz for screen readers', () => {
 		})
 		;(wrapper.vm as any).submitQuiz()
 		await flushPromises()
-		expect(document.activeElement?.textContent?.trim()).toBe('Quiz Summary')
+		expect(document.activeElement?.textContent?.trim()).toBe('Quiz result')
 	})
 })

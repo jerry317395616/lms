@@ -61,6 +61,34 @@ describe('the settings tree', () => {
 
 		expect(new Set(names).size).toBe(names.length)
 	})
+
+	// Settings.vue binds the record model only where `records` is declared.
+	// Without it the page keeps the record in local state: Back skips the
+	// dirty guard and a refresh loses the open record.
+	it('declares records on every custom page that opens a record', () => {
+		const undeclared = items
+			.filter((item) => item.page.kind === 'custom' && !item.records)
+			.filter((item) => {
+				const props = (item.page as { component: { props?: object } }).component
+					.props
+				return Boolean(props && 'record' in props)
+			})
+			.map((item) => item.slug)
+
+		expect(undeclared).toEqual([])
+	})
+
+	// Regression: currency picker 403 for LMS roles (#3023, fixed in #3038).
+	it('searches every Currency link through the LMS query', () => {
+		const currencyLinks = items
+			.flatMap(fieldsOfItem)
+			.filter((field) => field.type === 'link' && field.doctype === 'Currency')
+
+		expect(currencyLinks).not.toHaveLength(0)
+		for (const field of currencyLinks) {
+			expect(field).toHaveProperty('query', 'lms.lms.api.search_currencies')
+		}
+	})
 })
 
 // A NEW_RECORD source builds no document resource, so nothing here reaches the

@@ -74,8 +74,14 @@
 				:placeholder="__('Lesson title')"
 				:aria-label="__('Lesson title')"
 				rows="1"
-				class="lesson-title block w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-2xl font-bold leading-tight text-ink-gray-9 placeholder:text-ink-gray-4 focus:outline-none focus:ring-0 focus-visible:ring-2 focus-visible:ring-outline-gray-5"
+				class="lesson-title block w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-2xl font-bold leading-tight text-ink-gray-9 placeholder:text-ink-gray-4 focus:outline-none"
+				:class="
+					titleKeyboardFocus
+						? 'focus:ring-2 focus:ring-outline-gray-5'
+						: 'focus:ring-0'
+				"
 				@input="onTitleInput"
+				@focus="titleKeyboardFocus = lastInputWasKeyboard"
 				@keydown.enter="onTitleEnter"
 				@blur="onTitleBlur"
 			/>
@@ -141,7 +147,7 @@ import {
 	useId,
 } from 'vue'
 import { ChevronRight, NotebookPen } from 'lucide-vue-next'
-import { useDebounceFn } from '@vueuse/core'
+import { useDebounceFn, useEventListener } from '@vueuse/core'
 import { enablePlyr, sanitizeEditorJs } from '@/utils'
 import {
 	hasEditorContent,
@@ -156,6 +162,7 @@ import BlockEditor from '@/components/BlockEditor.vue'
 import BottomSheet from '@/components/BottomSheet.vue'
 import { useScreenSize } from '@/utils/composables'
 import { useOnboarding } from '@framework/ui/components/Onboarding/index'
+import { seesOnboarding } from '@/utils/onboarding'
 import { useTelemetry } from '@framework/ui/telemetry/index'
 import {
 	useKeyboardShortcuts,
@@ -171,6 +178,24 @@ const editor = ref(null)
 const instructorEditor = ref(null)
 const user = inject('$user')
 const titleRef = ref(null)
+// Text fields always match :focus-visible, even on click, so the ring follows
+// the input that led to the focus: a key (Tab, or Enter on "Add Lesson") shows it.
+const titleKeyboardFocus = ref(false)
+let lastInputWasKeyboard = false
+useEventListener(
+	document,
+	'keydown',
+	(e) => {
+		if (!e.metaKey && !e.ctrlKey && !e.altKey) lastInputWasKeyboard = true
+	},
+	true
+)
+useEventListener(
+	document,
+	'pointerdown',
+	() => (lastInputWasKeyboard = false),
+	true
+)
 const formRef = ref(null)
 
 // A lesson title is one line. The field stays a textarea so a long title wraps
@@ -189,6 +214,7 @@ function onTitleInput() {
 }
 
 function onTitleBlur() {
+	titleKeyboardFocus.value = false
 	if (isDraft.value) createDraftLesson()
 }
 
@@ -386,7 +412,6 @@ function promoteDraft(name) {
 	}
 	contentUploadContext.docname = name
 	instructorUploadContext.docname = name
-	capture('lesson_created')
 	emit('created', { name, chapter: draftChapter })
 	// Typed while the create was in flight.
 	if (lesson.title.trim() !== createdTitle) isDirty.value = true
@@ -674,10 +699,9 @@ const linkLesson = (lessonName) =>
 		{ lesson: lessonName },
 		{
 			onSuccess() {
-				if (user.data?.is_system_manager)
+				if (seesOnboarding(user.data))
 					updateOnboardingStep('create_first_lesson')
 
-				capture('lesson_created')
 				toast.success(__('Lesson created successfully'))
 				isDirty.value = false
 				emit('saved', { isNew: true })
